@@ -13,12 +13,14 @@ aa3_to_aa1_lut = {
     "Arg": "R",
     "Asn": "N",
     "Asp": "D",
+    "Asx": "B",
     "Cys": "C",
     "Gln": "Q",
     "Glu": "E",
     "Gly": "G",
     "His": "H",
     "Ile": "I",
+    "Xle": "J",
     "Leu": "L",
     "Lys": "K",
     "Met": "M",
@@ -32,6 +34,7 @@ aa3_to_aa1_lut = {
     "Xaa": "X",
     "Ter": "*",
     "Sec": "U",
+    "Glx": "Z",
 }
 
 aa1_to_aa3_lut = {v: k for k, v in aa3_to_aa1_lut.items()}
