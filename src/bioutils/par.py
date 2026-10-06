@@ -29,9 +29,9 @@ regions::
       | gzip -c >src/bioutils/_data/par/GRCh38.json.gz
 
 PAR coordinates are stable across patch releases within a build, so files are
-named for the build (``"GRCh38"``), the same names as ``_data/assemblies``, so one
-assembly name serves :func:`bioutils.assemblies.get_assembly` and
-:func:`get_par_map` alike. Each file is a flat JSON document in the style of
+named for the build (``"GRCh38"``). Functions take an assembly name as used by
+:func:`bioutils.assemblies.get_assembly`, either a build or a patch release
+(``"GRCh38.p14"``), which resolves to its build. Each file is a flat JSON document in the style of
 ``_data/assemblies``: provenance fields (``assembly``, ``refseq_ac``,
 ``accessions``, ``coordinates``, ``source``, ``source_url``) beside the
 ``regions`` data (see :func:`get_par_meta`).
@@ -40,6 +40,7 @@ assembly name serves :func:`bioutils.assemblies.get_assembly` and
 import functools
 import gzip
 import json
+import re
 from importlib import resources
 from pathlib import Path
 from typing import TypedDict, cast
@@ -58,9 +59,18 @@ class ParMeta(TypedDict):
     source_url: str
 
 
+def _build_name(assembly_name: str) -> str:
+    """Maps an assembly name to the build its PAR data is stored under."""
+    build = re.sub(r"\.p\d+$", "", assembly_name)
+    if build not in get_par_names():
+        msg = f"no PAR data for assembly {assembly_name!r}; available builds: {sorted(get_par_names())}"
+        raise ValueError(msg)
+    return build
+
+
 @functools.cache
-def _load(name: str) -> dict:
-    fn = _data_dir / f"{name}.json.gz"
+def _load(assembly_name: str) -> dict:
+    fn = _data_dir / f"{_build_name(assembly_name)}.json.gz"
     with gzip.open(fn, mode="rt", encoding="utf-8") as fh:
         return json.load(fh)
 
@@ -69,7 +79,8 @@ def get_par_names() -> list[str]:
     """Retrieves available PAR datasets from the ``_data/par`` directory.
 
     Returns:
-        list of str: The names of the available PAR datasets.
+        list of str: The builds with PAR data. Any patch release of these
+        (e.g. ``"GRCh38.p14"``) is also accepted by the other functions.
 
     Examples:
         >>> sorted(get_par_names())
@@ -79,11 +90,12 @@ def get_par_names() -> list[str]:
     return [n.name.replace(".json.gz", "") for n in _data_dir.glob("*.json.gz")]
 
 
-def get_par_map(name: str) -> dict[str, dict[str, list[int]]]:
-    """Retrieves PAR coordinates by dataset name.
+def get_par_map(assembly_name: str) -> dict[str, dict[str, list[int]]]:
+    """Retrieves PAR coordinates for an assembly.
 
     Args:
-        name (str): The name of the PAR dataset to retrieve.
+        assembly_name (str): A build (``"GRCh38"``) or patch release
+            (``"GRCh38.p14"``); patches share their build's coordinates.
 
     Returns:
         dict: A dictionary of the form ``{chromosome: {label: [start_i, end_i]}}``,
@@ -96,6 +108,11 @@ def get_par_map(name: str) -> dict[str, dict[str, list[int]]]:
         >>> par["Y"]["PAR2"]
         [56887902, 57217415]
 
+        A patch release gives its build's coordinates:
+
+        >>> get_par_map("GRCh38.p14") == par
+        True
+
         PAR1 is not at the same X and Y coordinates in every build:
 
         >>> get_par_map("GRCh37")["X"]["PAR1"]
@@ -104,18 +121,18 @@ def get_par_map(name: str) -> dict[str, dict[str, list[int]]]:
         [10000, 2649520]
     """
 
-    return _load(name)["regions"]
+    return _load(assembly_name)["regions"]
 
 
-def get_par_meta(name: str) -> ParMeta:
+def get_par_meta(assembly_name: str) -> ParMeta:
     """Retrieves provenance metadata for a PAR dataset.
 
     Args:
-        name (str): The name of the PAR dataset.
+        assembly_name (str): A build or patch release, as for :func:`get_par_map`.
 
     Returns:
         dict: Every top-level field of the dataset except ``regions``: the
-        assembly name and RefSeq accession, the X and Y sequence accessions,
+        assembly the data was generated from and its RefSeq accession, the X and Y sequence accessions,
         the coordinate convention, and the upstream source and URL.
 
     Examples:
@@ -130,19 +147,22 @@ def get_par_meta(name: str) -> ParMeta:
         'interbase (0-based, left-closed, right-open)'
     """
 
-    return cast("ParMeta", {k: v for k, v in _load(name).items() if k != "regions"})
+    return cast("ParMeta", {k: v for k, v in _load(assembly_name).items() if k != "regions"})
 
 
-def get_par_maps(names: list[str] | None = None) -> dict[str, dict[str, dict[str, list[int]]]]:
+def get_par_maps(
+    assembly_names: list[str] | None = None,
+) -> dict[str, dict[str, dict[str, list[int]]]]:
     """Retrieves PAR coordinates for multiple datasets.
 
     If datasets are not specified, retrieves data for all available ones.
 
     Args:
-        names (list of str, optional): The names of the PAR datasets.
+        assembly_names (list of str, optional): Builds or patch releases, as
+            for :func:`get_par_map`.
 
     Returns:
-        dict: A dictionary of the form ``{name: par_data}``.
+        dict: A dictionary of the form ``{assembly_name: par_data}``.
 
     Examples:
         >>> maps = get_par_maps()
@@ -150,16 +170,16 @@ def get_par_maps(names: list[str] | None = None) -> dict[str, dict[str, dict[str
         [10000, 2781479]
     """
 
-    if names is None:
-        names = get_par_names()
-    return {name: get_par_map(name) for name in names}
+    if assembly_names is None:
+        assembly_names = get_par_names()
+    return {name: get_par_map(name) for name in assembly_names}
 
 
-def get_par_label(name: str, chrom: str, pos_i: int) -> str | None:
+def get_par_label(assembly_name: str, chrom: str, pos_i: int) -> str | None:
     """Names the pseudoautosomal region containing a position, if any.
 
     Args:
-        name (str): The name of the PAR dataset to test against.
+        assembly_name (str): A build or patch release, as for :func:`get_par_map`.
         chrom (str): Chromosome name as used by the assembly (``"X"`` or
             ``"Y"``; no ``chr`` prefix).
         pos_i (int): Interbase (0-based) position of a nucleotide, i.e. the
@@ -172,7 +192,8 @@ def get_par_label(name: str, chrom: str, pos_i: int) -> str | None:
         pseudoautosomal regions.
 
     Raises:
-        ValueError: If ``chrom`` carries a ``chr`` prefix.
+        ValueError: If ``chrom`` carries a ``chr`` prefix, or there is no PAR
+            data for ``assembly_name``.
 
     Examples:
         >>> get_par_label("GRCh38", "X", 1000000)
@@ -194,18 +215,18 @@ def get_par_label(name: str, chrom: str, pos_i: int) -> str | None:
     if chrom.lower().startswith("chr"):
         msg = f"use the assembly's chromosome name without a 'chr' prefix, got {chrom!r}"
         raise ValueError(msg)
-    regions = get_par_map(name).get(chrom, {})
+    regions = get_par_map(assembly_name).get(chrom, {})
     for label, (start_i, end_i) in regions.items():
         if start_i <= pos_i < end_i:
             return label
     return None
 
 
-def in_par(name: str, chrom: str, pos_i: int) -> bool:
+def in_par(assembly_name: str, chrom: str, pos_i: int) -> bool:
     """Tests whether a position falls in a pseudoautosomal region.
 
     Args:
-        name (str): The name of the PAR dataset to test against.
+        assembly_name (str): A build or patch release, as for :func:`get_par_map`.
         chrom (str): Chromosome name as used by the assembly (``"X"`` or
             ``"Y"``; no ``chr`` prefix).
         pos_i (int): Interbase (0-based) position of a nucleotide. For a
@@ -216,7 +237,8 @@ def in_par(name: str, chrom: str, pos_i: int) -> bool:
         for chromosomes that have no pseudoautosomal regions.
 
     Raises:
-        ValueError: If ``chrom`` carries a ``chr`` prefix.
+        ValueError: If ``chrom`` carries a ``chr`` prefix, or there is no PAR
+            data for ``assembly_name``.
 
     Examples:
         The first and last bases of GRCh38 PAR1 are NCBI 10,001 and 2,781,479
@@ -238,4 +260,4 @@ def in_par(name: str, chrom: str, pos_i: int) -> bool:
         True
     """
 
-    return get_par_label(name, chrom, pos_i) is not None
+    return get_par_label(assembly_name, chrom, pos_i) is not None

@@ -88,6 +88,28 @@ def test_meta_records_provenance(name):
     assert meta["refseq_ac"] in meta["source_url"]
 
 
+@pytest.mark.parametrize(
+    ("assembly_name", "build"),
+    [
+        ("GRCh37.p13", "GRCh37"),
+        ("GRCh37.p2", "GRCh37"),
+        ("GRCh38.p14", "GRCh38"),
+        ("GRCh38.p1", "GRCh38"),
+    ],
+)
+def test_patch_release_resolves_to_build(assembly_name, build):
+    # PARs are stable across patches, so any patch gets its build's data.
+    assert get_par_map(assembly_name) == EXPECTED[build]
+    assert get_par_meta(assembly_name) == get_par_meta(build)
+    assert in_par(assembly_name, "X", EXPECTED[build]["X"]["PAR1"][0]) is True
+
+
+@pytest.mark.parametrize("assembly_name", ["hg38", "GRCh39", "GRCh38.p14x", "NCBI36"])
+def test_unknown_assembly_is_rejected(assembly_name):
+    with pytest.raises(ValueError, match="no PAR data for assembly"):
+        get_par_map(assembly_name)
+
+
 def test_get_par_maps_returns_all():
     assert get_par_maps() == EXPECTED
 
