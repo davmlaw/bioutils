@@ -13,8 +13,12 @@ generator converts ``[start, end]`` to ``[start - 1, end]``, so a
 ``[s, e]`` when ``s <= pos - 1 < e``. The original NCBI values are recoverable
 as ``[start + 1, end]`` and are recorded in ``tests/test_par.py``.
 
-Chromosome names are the assembly's own (``"X"``, ``"Y"``), without a ``chr``
-prefix, as elsewhere in bioutils (see the note in :mod:`bioutils.assemblies`).
+Positions are looked up by RefSeq sequence accession (``"NC_000023.11"``), as
+elsewhere in biocommons. A versioned accession identifies one sequence of one
+build, so no assembly name is needed and there is no ambiguity over ``chr``
+prefixes. The whole-assembly views (:func:`get_par_map`, :func:`get_par_maps`)
+are keyed by the assembly's own chromosome names (``"X"``, ``"Y"``), and
+:func:`get_par_meta` gives the accession of each.
 
 Region labels are ``"PAR1"`` (the p-terminal region, shared by the short arms)
 and ``"PAR2"`` (the q-terminal region): NCBI's own "PAR#1" and "PAR#2" names
@@ -44,6 +48,8 @@ import re
 from importlib import resources
 from pathlib import Path
 from typing import TypedDict, cast
+
+from bioutils.assemblies import get_assemblies
 
 _data_dir = Path(str(resources.files("bioutils") / "_data" / "par"))
 
@@ -175,89 +181,138 @@ def get_par_maps(
     return {name: get_par_map(name) for name in assembly_names}
 
 
-def get_par_label(assembly_name: str, chrom: str, pos_i: int) -> str | None:
+@functools.cache
+def _ac_regions() -> dict[str, dict[str, list[int]]]:
+    """Maps each X and Y accession with PAR data to its regions."""
+    ac_regions = {}
+    for name in get_par_names():
+        doc = _load(name)
+        for chrom, ac in doc["accessions"].items():
+            ac_regions[ac] = doc["regions"][chrom]
+    return ac_regions
+
+
+@functools.cache
+def _sex_chromosome_acs() -> frozenset[str]:
+    """X and Y accessions of every assembly in bioutils, with or without PAR data."""
+    return frozenset(
+        s["refseq_ac"]
+        for assembly in get_assemblies().values()
+        for s in assembly["sequences"]
+        if s["name"] in ("X", "Y")
+    )
+
+
+def get_par_regions(ac: str) -> dict[str, list[int]]:
+    """Retrieves the pseudoautosomal regions of a sequence.
+
+    Args:
+        ac (str): Versioned RefSeq accession of the sequence, e.g.
+            ``"NC_000023.11"`` (GRCh38 X).
+
+    Returns:
+        dict: A dictionary of the form ``{label: [start_i, end_i]}``, with
+        interbase coordinates. Empty for a sequence with no pseudoautosomal
+        regions, such as an autosome.
+
+    Raises:
+        ValueError: If ``ac`` is not a versioned accession (e.g. ``"X"``,
+            ``"chrX"`` or ``"NC_000023"``), or is the X or Y of an assembly
+            with no PAR data, such as NCBI36.
+
+    Examples:
+        >>> get_par_regions("NC_000023.11")
+        {'PAR1': [10000, 2781479], 'PAR2': [155701382, 156030895]}
+        >>> get_par_regions("NC_000001.11")
+        {}
+    """
+
+    if not re.fullmatch(r"[A-Z]{2}_\d+\.\d+", ac):
+        msg = f"expected a versioned sequence accession such as 'NC_000023.11', got {ac!r}"
+        raise ValueError(msg)
+    if ac in _ac_regions():
+        return _ac_regions()[ac]
+    if ac in _sex_chromosome_acs():
+        msg = f"no PAR data for sequence {ac!r}; available builds: {sorted(get_par_names())}"
+        raise ValueError(msg)
+    return {}
+
+
+def get_par_label(ac: str, pos_i: int) -> str | None:
     """Names the pseudoautosomal region containing a position, if any.
 
     Args:
-        assembly_name (str): A build or patch release, as for :func:`get_par_map`.
-        chrom (str): Chromosome name as used by the assembly (``"X"`` or
-            ``"Y"``; no ``chr`` prefix).
+        ac (str): Versioned RefSeq accession of the sequence, as for
+            :func:`get_par_regions`.
         pos_i (int): Interbase (0-based) position of a nucleotide, i.e. the
             interval ``[pos_i, pos_i + 1)``. For a 1-based position such as a
             VCF ``POS``, pass ``POS - 1``.
 
     Returns:
         str or None: ``"PAR1"`` or ``"PAR2"`` when the position falls inside a
-        region, otherwise None. None for any chromosome that has no
+        region, otherwise None. None for any sequence that has no
         pseudoautosomal regions.
 
     Raises:
-        ValueError: If ``chrom`` carries a ``chr`` prefix, or there is no PAR
-            data for ``assembly_name``.
+        ValueError: As for :func:`get_par_regions`.
 
     Examples:
-        >>> get_par_label("GRCh38", "X", 1000000)
+        >>> get_par_label("NC_000023.11", 1000000)
         'PAR1'
-        >>> get_par_label("GRCh38", "X", 155800000)
+        >>> get_par_label("NC_000023.11", 155800000)
         'PAR2'
 
         The non-PAR bulk of X, where males are hemizygous:
 
-        >>> get_par_label("GRCh38", "X", 100000000) is None
+        >>> get_par_label("NC_000023.11", 100000000) is None
         True
 
         Autosomes never are:
 
-        >>> get_par_label("GRCh38", "1", 1000000) is None
+        >>> get_par_label("NC_000001.11", 1000000) is None
         True
     """
 
-    if chrom.lower().startswith("chr"):
-        msg = f"use the assembly's chromosome name without a 'chr' prefix, got {chrom!r}"
-        raise ValueError(msg)
-    regions = get_par_map(assembly_name).get(chrom, {})
-    for label, (start_i, end_i) in regions.items():
+    for label, (start_i, end_i) in get_par_regions(ac).items():
         if start_i <= pos_i < end_i:
             return label
     return None
 
 
-def in_par(assembly_name: str, chrom: str, pos_i: int) -> bool:
+def in_par(ac: str, pos_i: int) -> bool:
     """Tests whether a position falls in a pseudoautosomal region.
 
     Args:
-        assembly_name (str): A build or patch release, as for :func:`get_par_map`.
-        chrom (str): Chromosome name as used by the assembly (``"X"`` or
-            ``"Y"``; no ``chr`` prefix).
+        ac (str): Versioned RefSeq accession of the sequence, as for
+            :func:`get_par_regions`.
         pos_i (int): Interbase (0-based) position of a nucleotide. For a
             1-based position such as a VCF ``POS``, pass ``POS - 1``.
 
     Returns:
-        bool: True if the position is within a PAR on ``chrom``. Always False
-        for chromosomes that have no pseudoautosomal regions.
+        bool: True if the position is within a PAR on ``ac``. Always False
+        for sequences that have no pseudoautosomal regions.
 
     Raises:
-        ValueError: If ``chrom`` carries a ``chr`` prefix, or there is no PAR
-            data for ``assembly_name``.
+        ValueError: As for :func:`get_par_regions`.
 
     Examples:
         The first and last bases of GRCh38 PAR1 are NCBI 10,001 and 2,781,479
         (1-based), so in interbase terms:
 
-        >>> in_par("GRCh38", "X", 10000)
+        >>> in_par("NC_000023.11", 10000)
         True
-        >>> in_par("GRCh38", "X", 9999)
+        >>> in_par("NC_000023.11", 9999)
         False
-        >>> in_par("GRCh38", "X", 2781478)
+        >>> in_par("NC_000023.11", 2781478)
         True
-        >>> in_par("GRCh38", "X", 2781479)
+        >>> in_par("NC_000023.11", 2781479)
         False
 
         From a VCF record:
 
         >>> vcf_pos = 10001
-        >>> in_par("GRCh38", "X", vcf_pos - 1)
+        >>> in_par("NC_000023.11", vcf_pos - 1)
         True
     """
 
-    return get_par_label(assembly_name, chrom, pos_i) is not None
+    return get_par_label(ac, pos_i) is not None
